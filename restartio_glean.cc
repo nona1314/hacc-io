@@ -20,6 +20,8 @@ RestartIO_GLEAN::RestartIO_GLEAN () :
                                     m_localParticles (-1),
                                     m_totPartParticles (-1),
                                     m_totGlobalParticles (-1),
+                                    m_localPageNum (-1),
+                                    m_totGlobalPageNum (-1),
                                     m_mode(UNDEF_MODE),
                                     m_interface (USE_MPIIO),
                                     m_posixAPI (USE_READ_WRITE),
@@ -27,6 +29,7 @@ RestartIO_GLEAN::RestartIO_GLEAN () :
                                     m_startTime(0),
                                     m_endTime (0),
                                     m_preallocFile(1),
+                                    m_prefillFile(0),
                                     m_readSize(0),
 #ifdef HACC_IO_FILE_PER_PROCESS
                                     m_fileDist (GLEAN_FILE_PER_RANK)
@@ -104,8 +107,6 @@ int RestartIO_GLEAN :: CreateCheckpoint (char* pathname, int64_t& num_particles)
     
     m_mode = WRITE_CHECKPOINT;
     
-    m_startTime = MPI_Wtime();
-    
     m_localParticles = num_particles;
     
     // Set the Base Path Name
@@ -143,16 +144,27 @@ int RestartIO_GLEAN :: CreateCheckpoint (char* pathname, int64_t& num_particles)
     //    ----------------------------------------------
     int64_t record_size,  tot_file_size;
     
+    m_pageNumFloat = (num_particles * sizeof(float) + 4095) / 4096;
+    m_pageNumInt64 = (num_particles * sizeof(int64_t) + 4095) / 4096;
+    m_pageNumUint16 = (num_particles * sizeof(uint16_t) + 4095) / 4096;
+    m_localPageNum = (7 * m_pageNumFloat) + m_pageNumInt64 + m_pageNumUint16;
+    // Total Gloabl Page Number
+    MPI_Allreduce(&m_localPageNum, &m_totGlobalPageNum, 1, MPI_LONG_LONG,
+                  MPI_SUM, m_globalComm);
     record_size = (7 * sizeof(float)) + sizeof(int64_t) + sizeof(uint16_t);
     
-    tot_file_size = ((m_totPartParticles * record_size ) ) + m_headerSize;
+    tot_file_size = ((m_totGlobalPageNum * 4096 ) ) + m_headerSize;
     m_partFileSize = tot_file_size;
     
     
     // Create the header on rank 0 of the partition
     if ( 0 == m_partitionRank)
     {
-        m_header = new int64_t [ m_headerSize /(sizeof(int64_t))];
+        void* ptr;
+        int mem_err;
+        mem_err = posix_memalign(&ptr, 4096, m_headerSize);
+        if(mem_err != 0) {cout << "ERROR POSIX_MEMALIGN errno =" << mem_err << endl;}
+        m_header = (int64_t*)ptr;
         memset (m_header, 0, m_headerSize);
         m_header[0] = 0; // 0 = Invalid  and 1 = valid -- Unused for now
         m_header[1] = (int64_t)HEADER_METAINFO_SIZE; //
@@ -195,6 +207,7 @@ int RestartIO_GLEAN :: CreateCheckpoint (char* pathname, int64_t& num_particles)
             break;
     }
 
+    m_startTime = MPI_Wtime();
     return status;
 }
 
@@ -213,20 +226,29 @@ int RestartIO_GLEAN :: __POSIX_Create (void )
     // Create the File on root and set the file size if needed
     if ( 0 == m_partitionRank)
     {
-        retval = ::open((char *)m_partFileName, O_CREAT | O_WRONLY, 0664);
+        retval = ::open((char *)m_partFileName, O_CREAT | O_WRONLY | O_DIRECT, 0664);
         assert (retval > 0);
         
         m_posixFD = retval;
         
         if (1 == m_preallocFile)
         {
-            //retval = ::ftruncate64(m_posixFD, m_partFileSize);
-            retval = ::ftruncate(m_posixFD, m_partFileSize);
-            if (retval == -1)
-            {
-                GLEAN_PRINT_PERROR(" Error Opening %s \n", m_partFileName);
+            if ( m_prefillFile == 0) {
+                //retval = ::ftruncate64(m_posixFD, m_partFileSize);
+                retval = ::ftruncate(m_posixFD, m_partFileSize);
+                if (retval == -1)
+                {
+                    GLEAN_PRINT_PERROR(" Error Opening %s \n", m_partFileName);
+                }
+                //assert (retval == 0);
+            } else {
+                void *temp_buf;
+                posix_memalign(&temp_buf, 4096, 4096);
+                for (int i=0;i<m_totGlobalPageNum;i++) {
+                    ::write(m_posixFD, temp_buf, 4096); 
+                }
+                ::fsync(m_posixFD);
             }
-            //assert (retval == 0);
         }
         ::close (m_posixFD);
     }
@@ -234,7 +256,7 @@ int RestartIO_GLEAN :: __POSIX_Create (void )
     MPI_Barrier (m_partitionComm);
 
     // Open the file for writing on all ranks of partition
-    retval = ::open((char *)m_partFileName, O_WRONLY, 0664);
+    retval = ::open((char *)m_partFileName, O_WRONLY|O_DIRECT, 0664);
     if (retval == -1)
     {
         GLEAN_PRINT_PERROR(" Error Ftruncating %s \n", m_partFileName);
@@ -531,7 +553,7 @@ int RestartIO_GLEAN :: __POSIX_Write_Data (const char* buf,
     int myerr;
     
     nleft = *nbytes;
-        
+
     while (nleft > 0)
     {
         // Use the appropriate POSIX API
@@ -577,8 +599,8 @@ int RestartIO_GLEAN :: __POSIX_Write_Data (const char* buf,
                     continue;
                     break;
                 default:
-                    GLEAN_PRINT_PERROR (" Write Error: Rank %d  \n", \
-                                        m_globalCommRank);
+                    GLEAN_PRINT_PERROR (" Write Error[%d]: Rank %d  \n", \
+                                        myerr, m_globalCommRank);
     
                     *nbytes =  totwrite;
                     return -1;
@@ -588,7 +610,6 @@ int RestartIO_GLEAN :: __POSIX_Write_Data (const char* buf,
     }
     
     *nbytes =  totwrite;
-    
     return 0;
 }
 
@@ -750,10 +771,10 @@ int RestartIO_GLEAN :: Close (void)
         switch (m_mode)
         {
             case READ_RESTART:
-                cout << " READ Restart Perf: " << bw << " BW[MB/s] " << tot_data_size << " Bytes " << agg_max_time << " MaxTime[sec] " <<  endl;
+                cout << " READ Restart Perf: " << bw << " BW[MB/s] " << tot_data_size << " Bytes " << agg_max_time << " MaxTime[sec] " << agg_min_time << " MinTime[sec] "<< endl;
                 break;
             case WRITE_CHECKPOINT:
-                cout << " WRITE Checkpoint Perf: " << bw <<" BW[MB/s] " << tot_data_size << " Bytes " << agg_max_time << " MaxTime[sec] " <<  endl;
+                cout << " WRITE Checkpoint Perf: " << bw <<" BW[MB/s] " << tot_data_size << " Bytes " << agg_max_time << " MaxTime[sec] " << agg_min_time << " MinTime[sec] " << endl;
                 break;
         }
         
@@ -840,6 +861,17 @@ void RestartIO_GLEAN :: DisablePreAllocateFile (void)
 }
 
 
+void RestartIO_GLEAN :: EnablePreFillFile (void)
+{
+    m_prefillFile = 1;
+    return;
+}
+
+void RestartIO_GLEAN :: DisablePreFillFile (void)
+{
+    m_prefillFile = 0;
+    return;
+}
 
 void RestartIO_GLEAN :: SetMPI_IO_Interface (void)
 {
@@ -1178,7 +1210,7 @@ int RestartIO_GLEAN :: __POSIX_Close_Checkpoint (void)
         
         if (m_header)
         {
-            delete [] m_header;
+            free(m_header);
             m_header = 0;
         }
     }
@@ -1243,9 +1275,9 @@ int RestartIO_GLEAN :: Write(float *xx, float *yy, float *zz,
 {
     MPI_Status status;
     int errcode, retval;
-
-    int64_t scan_size = 0, num_particles, nwrite, record_size;
     
+    int64_t scan_size = 0, num_particles, nwrite, record_size;
+
     record_size = (7 * sizeof(float)) + sizeof(int64_t) + sizeof(uint16_t);
     
     MPI_Offset ofst = m_headerSize; // file pointer
@@ -1253,51 +1285,54 @@ int RestartIO_GLEAN :: Write(float *xx, float *yy, float *zz,
     
     num_particles =  m_localParticles;
     
-    MPI_Exscan(&num_particles, &scan_size, 1,
-               MPI_LONG_LONG, MPI_SUM, m_partitionComm);
+    int64_t page_num_float = m_pageNumFloat;
+    int64_t page_num_int64 = m_pageNumInt64;
+    int64_t page_num_uint16 = m_pageNumUint16;
+    int64_t total_page_num = m_localPageNum;
     
+    MPI_Exscan(&total_page_num, &scan_size, 1,
+               MPI_LONG_LONG, MPI_SUM, m_partitionComm);
+
     if (0== m_partitionRank)
         scan_size = 0;
 
-    
     if (m_interface == USE_POSIX)
     {
-        pos_offst += (scan_size * record_size);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += (scan_size * 4096);
+        nwrite = page_num_float * 4096;
         errcode = __POSIX_Write_Data ((const char*)xx, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float *4096;
         errcode = __POSIX_Write_Data ((const char*)yy, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float*4096;
         errcode = __POSIX_Write_Data ((const char*)zz, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float*4096;
         errcode = __POSIX_Write_Data ((const char*)vx, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float*4096;
         errcode = __POSIX_Write_Data ((const char*)vy, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float*4096;
         errcode = __POSIX_Write_Data ((const char*)vz, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(float);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_float*4096;
         errcode = __POSIX_Write_Data ((const char*)phi, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(float);
-        nwrite = num_particles * sizeof(int64_t);
+        pos_offst += page_num_float * 4096;
+        nwrite = page_num_int64 * 4096;
         errcode = __POSIX_Write_Data ((const char*)pid, &nwrite, pos_offst);
         
-        pos_offst += num_particles * sizeof(int64_t);
-        nwrite = num_particles * sizeof(uint16_t);
+        pos_offst += page_num_int64 * 4096;
+        nwrite = page_num_uint16 * 4096;
         errcode = __POSIX_Write_Data ((const char*)mask, &nwrite, pos_offst);
-        
     }
     else if (m_interface == USE_MPIIO)
     {

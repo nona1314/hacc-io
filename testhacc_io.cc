@@ -45,15 +45,39 @@ int main (int argc, char * argv[])
     int64_t* pid;
     uint16_t* mask;
     
-    xx = new float[num_particles];
-    yy = new float[num_particles];
-    zz = new float[num_particles];
-    vx = new float[num_particles];
-    vy = new float[num_particles];
-    vz = new float[num_particles];
-    phi = new float[num_particles];
-    pid = new int64_t[num_particles];
-    mask = new uint16_t[num_particles];
+    void *xx1, *yy1, *zz1, *vx1, *vy1, *vz1, *phi1, *pid1, *mask1;
+
+    int64_t page_num_float = (num_particles * sizeof(float) + 4095) / 4096;
+    int64_t page_num_int64 = (num_particles * sizeof(int64_t) + 4095) / 4096;
+    int64_t page_num_uint16 = (num_particles * sizeof(uint16_t) + 4095) / 4096;
+    int mem_err;
+    mem_err = posix_memalign(&xx1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&yy1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&zz1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&vx1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&vy1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&vz1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&phi1, 4096, page_num_float * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&pid1, 4096, page_num_int64 * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    mem_err = posix_memalign(&mask1, 4096, page_num_uint16 * 4096);
+    if(mem_err != 0) { cout << mem_err << endl; return -1;}
+    xx = (float*)xx1;
+    yy = (float*)yy1;
+    zz = (float*)zz1;
+    vx = (float*)vx1;
+    vy = (float*)vy1;
+    vz = (float*)vz1;
+    phi = (float*)phi1;
+    pid = (int64_t*)pid1;
+    mask = (uint16_t*)mask1;
     
     for (uint64_t i = 0; i< num_particles; i++)
     {
@@ -73,8 +97,9 @@ int main (int argc, char * argv[])
     
     rst->Initialize(MPI_COMM_WORLD);
 
-    //rst->SetPOSIX_IO_Interface(1);
-    rst->SetPOSIX_IO_Interface();
+    rst->SetPOSIX_IO_Interface(1);
+    rst->DisablePreAllocateFile();
+    rst->DisablePreFillFile();
 
 #ifndef HACC_IO_DISABLE_WRITE
     rst->CreateCheckpoint (fname, num_particles);
@@ -139,16 +164,16 @@ int main (int argc, char * argv[])
     
 #ifndef HACC_IO_DISABLE_WRITE
     // Delete the Arrays
-    delete []xx;
+    free(xx1);
 
-    delete []yy;
-    delete []zz;
-    delete []vx;
-    delete []vy;
-    delete []vz;
-    delete []phi;
-    delete []pid;
-    delete []mask;
+    free(yy1);
+    free(zz1);
+    free(vx1);
+    free(vy1);
+    free(vz1);
+    free(phi1);
+    free(pid1);
+    free(mask1);
 #endif
 
 #ifndef HACC_IO_DISABLE_READ

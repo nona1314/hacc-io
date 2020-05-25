@@ -105,6 +105,10 @@ public:
     
     void DisablePreAllocateFile(void);
     
+    void EnablePreFillFile(void);
+ 
+    void DisablePreFillFile(void);
+
     void SetMPI_IO_Interface(void);
     
     void SetPOSIX_IO_Interface(int val = 0);
@@ -196,6 +200,12 @@ private:
     int64_t m_totPartParticles;
     
     int64_t m_totGlobalParticles;
+
+    int64_t m_localPageNum; // 4kb aligned page number
+    int64_t m_totGlobalPageNum; // 4kb aligned page number total
+    int64_t m_pageNumFloat;
+    int64_t m_pageNumInt64;
+    int64_t m_pageNumUint16;
     
     GLEAN_IO_MODE m_mode; // Current Access Mode
     
@@ -227,7 +237,9 @@ private:
     
     // Performance Tweaking Parameters
     int m_preallocFile;
-    
+
+    int m_prefillFile; // let fs map file to block
+
    GLEAN_FILE_DISTRIBUTION m_fileDist;
 
 };
